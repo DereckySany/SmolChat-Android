@@ -38,29 +38,27 @@ jobs:
         with:
           ndk-version: r27c # Verifique se r27c é a versão desejada ou use 'latest'
           add-to-path: true
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        # O 'env' aqui define o NDK Home para esta etapa, mas não necessariamente para as seguintes
+        # A opção 'add-to-path: true' é geralmente suficiente
+        # Removido o env redundante aqui, 'add-to-path' deve cuidar disso globalmente para o job
 
       # Decodifica o keystore APENAS se for build 'release' (seja por tag ou manual)
-      # Builds debug geralmente não precisam/usam o keystore de release
       - name: Decode keystore
-        # Executa se for push de tag OU se for manual E o tipo escolhido for 'release'
-        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'release')
+        # CORREÇÃO: Expressão 'if' precisa estar dentro de ${{ }}
+        if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'release') }}
         env:
           ENCODED_STRING: ${{ secrets.KEYSTORE_BASE_64 }}
         run: |
           echo "Decoding keystore for release build..."
-          echo $ENCODED_STRING > keystore-b64.txt
-          base64 -d keystore-b64.txt > keystore.jks
-          # Mova ou configure o build.gradle para encontrar este arquivo, ex:
-          # mv keystore.jks app/keystore.jks
+          echo "$ENCODED_STRING" | base64 -d > keystore.jks
+          # Considere mover ou referenciar este keystore.jks no seu build.gradle
+          # Exemplo: mv keystore.jks app/
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
       - name: Determine Build Task and Keystore Env Vars
         id: build_vars
-        # Define qual tarefa Gradle usar e se deve passar variáveis do keystore
         run: |
           TASK_NAME=""
           PASS_KEYSTORE_ENV="false" # Flag para saber se passa env vars do keystore
@@ -68,11 +66,12 @@ jobs:
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             # Manual trigger: Usa o input, capitaliza (release -> Release, debug -> Debug)
             SELECTED_TYPE="${{ github.event.inputs.build_type }}"
-            TASK_NAME="assemble$(echo $SELECTED_TYPE | awk '{print toupper(substr($0,1,1)) tolower(substr($0,2))}')"
+            # CORREÇÃO na capitalização: Usar printf para segurança com inputs
+            TASK_NAME="assemble$(printf '%s\n' "$SELECTED_TYPE" | awk '{print toupper(substr($0,1,1)) tolower(substr($0,2))}')"
             if [[ "$SELECTED_TYPE" == "release" ]]; then
               PASS_KEYSTORE_ENV="true"
             fi
-          elif [[ "${{ github.event_name }}" == "push" && startsWith(github.ref, 'refs/tags/') ]]; then
+          elif [[ "${{ github.event_name }}" == "push" && "${{ startsWith(github.ref, 'refs/tags/') }}" == "true" ]]; then # CORREÇÃO: Comparar resultado de startsWith
             # Tag push: Sempre release
             TASK_NAME="assembleRelease"
             PASS_KEYSTORE_ENV="true"
@@ -83,26 +82,38 @@ jobs:
           fi
 
           echo "Gradle task determined: $TASK_NAME"
-          echo "::set-output name=gradle_task::$TASK_NAME"
-          echo "::set-output name=use_keystore_env::$PASS_KEYSTORE_ENV"
+          # CORREÇÃO: Usar a sintaxe GITHUB_OUTPUT para definir outputs
+          echo "gradle_task=$TASK_NAME" >> $GITHUB_OUTPUT
+          echo "use_keystore_env=$PASS_KEYSTORE_ENV" >> $GITHUB_OUTPUT
 
       - name: Build APK
         env:
           # Passa as variáveis do Keystore SOMENTE se a etapa anterior determinou necessário
+          # A lógica aqui está correta usando o output
           RELEASE_KEYSTORE_PASSWORD: ${{ steps.build_vars.outputs.use_keystore_env == 'true' && secrets.RELEASE_KEYSTORE_PASSWORD || '' }}
           RELEASE_KEYSTORE_ALIAS: ${{ steps.build_vars.outputs.use_keystore_env == 'true' && secrets.RELEASE_KEYSTORE_ALIAS || '' }}
           RELEASE_KEY_PASSWORD: ${{ steps.build_vars.outputs.use_keystore_env == 'true' && secrets.RELEASE_KEY_PASSWORD || '' }}
         run: |
           echo "Running Gradle task: ${{ steps.build_vars.outputs.gradle_task }}"
-          # Garanta que seu build.gradle esteja configurado para usar estas env vars OU
-          # passe propriedades -PkeyAlias=... etc. condicionalmente se use_keystore_env for true
+          # Certifique-se que seu build.gradle use as env vars ou passe propriedades -P
+          # Exemplo de como passar propriedades condicionalmente (adapte ao seu build.gradle):
+          # GRADLE_PROPS=""
+          # if [[ "${{ steps.build_vars.outputs.use_keystore_env }}" == "true" ]]; then
+          #   GRADLE_PROPS="-Pandroid.injected.signing.store.file=$(pwd)/keystore.jks \
+          #                 -Pandroid.injected.signing.store.password=${RELEASE_KEYSTORE_PASSWORD} \
+          #                 -Pandroid.injected.signing.key.alias=${RELEASE_KEYSTORE_ALIAS} \
+          #                 -Pandroid.injected.signing.key.password=${RELEASE_KEY_PASSWORD}"
+          # fi
+          # ./gradlew ${{ steps.build_vars.outputs.gradle_task }} $GRADLE_PROPS --stacktrace
+
+          # Comando simplificado assumindo que build.gradle lê as ENV VARS:
           ./gradlew ${{ steps.build_vars.outputs.gradle_task }} --stacktrace
 
       # --- Etapas de Release/Upload ---
-      # Mantidas como antes, executando apenas para push de tags (portanto, sempre release)
 
       - name: Create a release
-        if: startsWith(github.ref, 'refs/tags/') # Executa apenas se for um push de tag
+        # CORREÇÃO: Expressão 'if' precisa estar dentro de ${{ }}
+        if: ${{ startsWith(github.ref, 'refs/tags/') }}
         uses: actions/create-release@v1
         id: create_release
         with:
@@ -115,13 +126,15 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
 
       - name: Upload APK to release
-        if: startsWith(github.ref, 'refs/tags/') # Executa apenas se for um push de tag
+        # CORREÇÃO: Expressão 'if' precisa estar dentro de ${{ }}
+        if: ${{ startsWith(github.ref, 'refs/tags/') }}
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          # O caminho para o APK de release
-          asset_path: app/build/outputs/apk/release/app-release.apk
+          # CORREÇÃO POTENCIAL: O caminho exato do APK pode variar. Verifique o output do seu build.
+          # O nome padrão é geralmente app-release.apk ou app-debug.apk
+          asset_path: app/build/outputs/apk/release/app-release.apk # Caminho para o APK de RELEASE
           asset_name: SmolChat_${{ github.ref_name }}.apk # Usa o nome da tag no nome do arquivo
           asset_content_type: application/vnd.android.package-archive
